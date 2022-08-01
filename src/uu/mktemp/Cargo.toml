@@ -16,6 +16,7 @@ path = "src/mktemp.rs"
 
 [dependencies]
 clap = { version = "3.1", features = ["wrap_help", "cargo"] }
+once_cell = "1.13.0"
 rand = "0.8"
 tempfile = "3"
 uucore = { version=">=0.0.11", package="uucore", path="../../uucore" }

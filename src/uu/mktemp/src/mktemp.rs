@@ -9,6 +9,7 @@
 // spell-checker:ignore (paths) GPGHome findxs
 
 use clap::{crate_version, Arg, ArgMatches, Command};
+use once_cell::sync::Lazy;
 use uucore::display::{println_verbatim, Quotable};
 use uucore::error::{FromIo, UError, UResult};
 use uucore::format_usage;
@@ -32,12 +33,24 @@ const USAGE: &str = "{} [OPTION]... [TEMPLATE]";
 
 static DEFAULT_TEMPLATE: &str = "tmp.XXXXXXXXXX";
 
+static ENV_TEMP_DIR: Lazy<String> = Lazy::new(|| env::temp_dir().display().to_string());
+
 static OPT_DIRECTORY: &str = "directory";
 static OPT_DRY_RUN: &str = "dry-run";
 static OPT_QUIET: &str = "quiet";
 static OPT_SUFFIX: &str = "suffix";
-static OPT_TMPDIR: &str = "tmpdir";
 static OPT_T: &str = "t";
+
+// Special case to work around a limitation of `clap`;
+// Clap does not have a way to require equals for only the short or long version of a
+// variable, so we split OPT_TMPDIR into OPT_P and OPT_TMPDIR.
+static OPT_P: &str = "p";
+static OPT_TMPDIR: &str = "tmpdir";
+
+static OPT_TMPDIR_HELP: &str = "interpret TEMPLATE relative to DIR; if DIR is not specified, use \
+$TMPDIR ($TMP on windows) if set, else /tmp. With this option, TEMPLATE must not \
+be an absolute name; unlike with -t, TEMPLATE may contain \
+slashes, but mktemp creates only the final component";
 
 static ARG_TEMPLATE: &str = "template";
 
@@ -127,64 +140,22 @@ struct Options {
     template: String,
 }
 
-/// Decide whether the argument to `--tmpdir` should actually be the template.
-///
-/// This function is required to work around a limitation of `clap`,
-/// the command-line argument parsing library. In case the command
-/// line is
-///
-/// ```sh
-/// mktemp --tmpdir XXX
-/// ```
-///
-/// the program should behave like
-///
-/// ```sh
-/// mktemp --tmpdir=${TMPDIR:-/tmp} XXX
-/// ```
-///
-/// However, `clap` thinks that `XXX` is the value of the `--tmpdir`
-/// option. This function returns `true` in this case and `false`
-/// in all other cases.
-fn is_tmpdir_argument_actually_the_template(matches: &ArgMatches) -> bool {
-    if !matches.is_present(ARG_TEMPLATE) {
-        if let Some(tmpdir) = matches.value_of(OPT_TMPDIR) {
-            if !Path::new(tmpdir).is_dir() && tmpdir.contains("XXX") {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 impl Options {
     fn from(matches: &ArgMatches) -> Self {
-        // Special case to work around a limitation of `clap`; see
-        // `is_tmpdir_argument_actually_the_template()` for more
-        // information.
-        //
-        // Fixed in clap 3
-        // See https://github.com/clap-rs/clap/pull/1587
-        let (tmpdir, template) = if is_tmpdir_argument_actually_the_template(matches) {
-            let tmpdir = Some(env::temp_dir().display().to_string());
-            let template = matches.value_of(OPT_TMPDIR).unwrap().to_string();
-            (tmpdir, template)
-        } else {
-            let tmpdir = matches.value_of(OPT_TMPDIR).map(String::from);
-            let template = matches
-                .value_of(ARG_TEMPLATE)
-                .unwrap_or(DEFAULT_TEMPLATE)
-                .to_string();
-            (tmpdir, template)
-        };
         Self {
             directory: matches.is_present(OPT_DIRECTORY),
             dry_run: matches.is_present(OPT_DRY_RUN),
             quiet: matches.is_present(OPT_QUIET),
-            tmpdir,
+            tmpdir: matches
+                .value_of(OPT_P)
+                .map(String::from)
+                .or_else(|| matches.value_of(OPT_TMPDIR).map(String::from)),
             suffix: matches.value_of(OPT_SUFFIX).map(String::from),
             treat_as_template: matches.is_present(OPT_T),
-            template,
+            template: matches
+                .value_of(ARG_TEMPLATE)
+                .unwrap_or(DEFAULT_TEMPLATE)
+                .to_string(),
         }
     }
 }
@@ -326,7 +297,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     if env::var("POSIXLY_CORRECT").is_ok() {
         // If POSIXLY_CORRECT was set, template MUST be the last argument.
-        if is_tmpdir_argument_actually_the_template(&matches) || matches.is_present(ARG_TEMPLATE) {
+        if matches.is_present(ARG_TEMPLATE) {
             // Template argument was provided, check if was the last one.
             if args.last().unwrap() != &options.template {
                 return Err(Box::new(MkTempError::TooManyTemplates));
@@ -395,15 +366,21 @@ pub fn uu_app<'a>() -> Command<'a> {
                 .value_name("SUFFIX"),
         )
         .arg(
-            Arg::new(OPT_TMPDIR)
+            Arg::new(OPT_P)
                 .short('p')
+                .conflicts_with(OPT_TMPDIR)
+                .help(OPT_TMPDIR_HELP)
+                .value_name("DIR")
+                .value_hint(clap::ValueHint::DirPath),
+        )
+        .arg(
+            Arg::new(OPT_TMPDIR)
                 .long(OPT_TMPDIR)
-                .help(
-                    "interpret TEMPLATE relative to DIR; if DIR is not specified, use \
-                     $TMPDIR ($TMP on windows) if set, else /tmp. With this option, TEMPLATE must not \
-                     be an absolute name; unlike with -t, TEMPLATE may contain \
-                     slashes, but mktemp creates only the final component",
-                )
+                .help(OPT_TMPDIR_HELP)
+                .min_values(0)
+                .max_values(1)
+                .require_equals(true)
+                .default_missing_value(ENV_TEMP_DIR.as_str())
                 .value_name("DIR")
                 .value_hint(clap::ValueHint::DirPath),
         )
@@ -415,7 +392,7 @@ pub fn uu_app<'a>() -> Command<'a> {
             Arg::new(ARG_TEMPLATE)
                 .multiple_occurrences(false)
                 .takes_value(true)
-                .max_values(1)
+                .max_values(1),
         )
 }
 
